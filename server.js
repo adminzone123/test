@@ -88,7 +88,8 @@ app.get('/proxy', (req, res) => {
     }, proxyRes => {
       if (proxyRes.statusCode >= 400) return res.status(502).json({ error: `Source: ${proxyRes.statusCode}` });
       res.setHeader('Content-Type', mime);
-      res.setHeader('Content-Disposition', `attachment; filename="${safeFile}.${safeExt}"`);
+      const asciiFile = (safeFile||'video').replace(/[^a-zA-Z0-9 _\-\.]/g,'_').substring(0,80);
+      res.setHeader('Content-Disposition', `attachment; filename="${asciiFile}.${safeExt}"`);
       if (proxyRes.headers['content-length']) res.setHeader('Content-Length', proxyRes.headers['content-length']);
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -242,7 +243,8 @@ app.get('/stream', (req, res) => {
   }
 
   res.setHeader('Content-Type', mime);
-  res.setHeader('Content-Disposition', `attachment; filename="${safeFile}.${safeExt}"`);
+  const asciiFile2 = (safeFile||'video').replace(/[^a-zA-Z0-9 _\-\.]/g,'_').substring(0,80);
+  res.setHeader('Content-Disposition', `attachment; filename="${asciiFile2}.${safeExt}"`);
   res.setHeader('Cache-Control', 'no-store');
 
   const { spawn } = require('child_process');
