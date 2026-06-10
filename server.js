@@ -1,361 +1,224 @@
 const express = require('express');
-const cors    = require('cors');
-const https   = require('https');
-const http    = require('http');
+const cors = require('cors');
+const https = require('https');
+const http = require('http');
+const { exec } = require('child_process');
 
-const app  = express();
+const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// ── Platform detection ─────────────────────────────
+// ── yt-dlp extract info ─────────────────────────────
+function ytdlp(url, extraArgs = '') {
+  return new Promise((resolve, reject) => {
+    const cmd = `yt-dlp --no-warnings --dump-json ${extraArgs} "${url}"`;
+    exec(cmd, { timeout: 45000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      if (err) return reject(err);
+      try { resolve(JSON.parse(stdout)); }
+      catch(e) { reject(new Error('JSON parse failed')); }
+    });
+  });
+}
+
+// ── Platform detection ──────────────────────────────
 function detectPlatform(u) {
   u = (u||'').toLowerCase();
-  if (u.includes('tiktok')||u.includes('douyin'))   return 'tiktok';
+  if (u.includes('tiktok')||u.includes('douyin')) return 'tiktok';
   if (u.includes('youtube')||u.includes('youtu.be')) return 'youtube';
-  if (u.includes('instagram'))                       return 'instagram';
-  if (u.includes('facebook')||u.includes('fb.watch'))return 'facebook';
-  if (u.includes('twitter')||u.includes('x.com'))   return 'twitter';
-  if (u.includes('reddit')||u.includes('redd.it'))  return 'reddit';
-  if (u.includes('pinterest'))                       return 'pinterest';
-  if (u.includes('vimeo'))                           return 'vimeo';
+  if (u.includes('instagram')) return 'instagram';
+  if (u.includes('facebook')||u.includes('fb.watch')) return 'facebook';
+  if (u.includes('twitter')||u.includes('x.com')) return 'twitter';
+  if (u.includes('reddit')||u.includes('redd.it')) return 'reddit';
+  if (u.includes('pinterest')) return 'pinterest';
+  if (u.includes('vimeo')) return 'vimeo';
   return 'other';
 }
 
-// ── HTTP request helper ────────────────────────────
-function makeRequest(url, options={}) {
+// ── TikWM for TikTok (yt-dlp has issues with TikTok) ─
+function tikwm(url) {
   return new Promise((resolve, reject) => {
-    try {
-      const parsed = new URL(url);
-      const mod    = parsed.protocol==='https:'?https:http;
-      const req    = mod.request({
-        hostname: parsed.hostname,
-        port:     parsed.port||(parsed.protocol==='https:'?443:80),
-        path:     parsed.pathname+parsed.search,
-        method:   options.method||'GET',
-        headers:  {'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0','Accept':'*/*',...(options.headers||{})},
-        timeout:  options.timeout||20000
-      }, res => {
-        const chunks=[];
-        res.on('data', c=>chunks.push(c));
-        res.on('end', ()=>resolve({status:res.statusCode, headers:res.headers, body:Buffer.concat(chunks)}));
-      });
-      req.on('error', reject);
-      req.on('timeout', ()=>{req.destroy(); reject(new Error('timeout'));});
-      if (options.body) req.write(options.body);
-      req.end();
-    } catch(e) { reject(e); }
-  });
-}
-
-// ── RapidAPI call ──────────────────────────────────
-async function callRapidApi(videoUrl) {
-  const key  = process.env.RAPIDAPI_KEY||'70100c663emsh52898dfd9e8465ep1f4f1cjsn48887eaf4470';
-  const host = 'social-download-all-in-one.p.rapidapi.com';
-  const body = JSON.stringify({url:videoUrl});
-  const r    = await makeRequest(`https://${host}/v1/social/autolink`, {
-    method:'POST', body, timeout:20000,
-    headers:{
-      'Content-Type':'application/json',
-      'Content-Length':Buffer.byteLength(body),
-      'x-rapidapi-key':key,
-      'x-rapidapi-host':host
-    }
-  });
-  return JSON.parse(r.body.toString());
-}
-
-// ── TikWM call ─────────────────────────────────────
-async function callTikWM(videoUrl) {
-  const key  = process.env.TIKWM_KEY||'582b4869135cf0cd6ac56c64453e42d4';
-  const body = `url=${encodeURIComponent(videoUrl)}&hd=1&web=1&token=${key}`;
-  const r    = await makeRequest('https://tikwm.com/api/', {
-    method:'POST', body, timeout:15000,
-    headers:{'Content-Type':'application/x-www-form-urlencoded','Content-Length':Buffer.byteLength(body)}
-  });
-  return JSON.parse(r.body.toString());
-}
-
-// ── Instagram direct API (faster than RapidAPI) ────
-async function callInstagramDirect(videoUrl) {
-  // Method 1: snapinsta API
-  const body = `url=${encodeURIComponent(videoUrl)}&lang=en`;
-  try {
-    const r = await makeRequest('https://snapinsta.app/action.php', {
-      method:'POST', body, timeout:12000,
-      headers:{
-        'Content-Type':'application/x-www-form-urlencoded',
-        'Referer':'https://snapinsta.app/',
-        'X-Requested-With':'XMLHttpRequest',
-        'Origin':'https://snapinsta.app'
-      }
+    const key = '582b4869135cf0cd6ac56c64453e42d4';
+    const body = `url=${encodeURIComponent(url)}&hd=1&web=1&token=${key}`;
+    const req = https.request({
+      hostname: 'tikwm.com', path: '/api/', method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) }
+    }, res => {
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
     });
-    const d = JSON.parse(r.body.toString());
-    if (d && (d.url||d.data)) return d;
-  } catch(e){}
-  return null;
+    req.on('error', reject);
+    req.write(body); req.end();
+  });
 }
 
-// ── Facebook direct API (faster) ──────────────────
-async function callFacebookDirect(videoUrl) {
-  try {
-    const body = `URLz=${encodeURIComponent(videoUrl)}`;
-    const r = await makeRequest('https://getfvid.com/downloader', {
-      method:'POST', body, timeout:12000,
-      headers:{
-        'Content-Type':'application/x-www-form-urlencoded',
-        'Referer':'https://getfvid.com/',
-        'Origin':'https://getfvid.com'
-      }
-    });
-    const html = r.body.toString();
-    const medias = [];
-    // Extract HD
-    const hdMatch = html.match(/href="(https:\/\/[^"]+\.mp4[^"]*)"[^>]*>.*?HD/is);
-    if (hdMatch) medias.push({url:hdMatch[1].replace(/&amp;/g,'&'), quality:'🎬 HD Quality', ext:'mp4', stream:true});
-    // Extract SD
-    const sdMatch = html.match(/href="(https:\/\/[^"]+\.mp4[^"]*)"[^>]*>.*?SD/is);
-    if (sdMatch) medias.push({url:sdMatch[1].replace(/&amp;/g,'&'), quality:'📹 SD Quality', ext:'mp4', stream:true});
-    if (medias.length) return medias;
-  } catch(e){}
-  return null;
-}
-
-// ── Build quality label ────────────────────────────
-function buildLabel(item) {
-  const ext  = (item.extension||item.ext||'mp4').toLowerCase();
-  const type = item.type||'video';
-  const q    = (item.quality||item.label||'').trim();
-  const h    = parseInt(item.height||0);
-  const w    = parseInt(item.width||0);
-  const isAud= type==='audio'||['mp3','m4a','opus'].includes(ext);
-
-  if (isAud) {
-    const kb=(q.match(/(\d+)\s*kb/i)||[])[1]||'';
-    return {icon:'🎵', label:`Audio MP3${kb?` (${kb}kbps)`:''}`, ext:['m4a','mp3'].includes(ext)?ext:'mp3'};
-  }
-  if (q.toUpperCase()==='HD') return {icon:'🎬', label:'HD Quality', ext};
-  if (q.toUpperCase()==='SD') return {icon:'📹', label:'SD Quality', ext};
-  const dim=Math.max(w,h)||parseInt((q.match(/(\d{3,4})/)||[])[1]||0);
-  if (dim>=2160) return {icon:'⭐', label:'4K (2160p)',    ext};
-  if (dim>=1440) return {icon:'⭐', label:'2K (1440p)',    ext};
-  if (dim>=1080) return {icon:'🎬', label:'Full HD (1080p)',ext};
-  if (dim>=720)  return {icon:'📹', label:'HD (720p)',     ext};
-  if (dim>=480)  return {icon:'📹', label:'SD (480p)',     ext};
-  if (dim>=360)  return {icon:'📹', label:'360p',          ext};
-  if (q)         return {icon:'🎬', label:q,               ext};
-  return {icon:'🎬', label:'HD Video', ext};
-}
-
-// ── PROXY — stream video from Render ──────────────
+// ── PROXY endpoint ──────────────────────────────────
 app.get('/proxy', (req, res) => {
-  const {url:rawUrl, filename='vidsavepro', ext='mp4'} = req.query;
+  const { url: rawUrl, filename = 'vidsavepro', ext = 'mp4' } = req.query;
   if (!rawUrl) return res.status(400).send('No URL');
 
   const videoUrl = decodeURIComponent(rawUrl);
   const safeFile = (filename||'vidsavepro').replace(/[^\w\s\-\.]/g,'_').substring(0,80);
-  const safeExt  = (ext||'mp4').replace(/[^a-z0-9]/g,'')||'mp4';
-  const mimes    = {mp4:'video/mp4',webm:'video/webm',mp3:'audio/mpeg',m4a:'audio/mp4',jpg:'image/jpeg',png:'image/png'};
-  const mime     = mimes[safeExt]||'video/mp4';
+  const safeExt  = (ext||'mp4').replace(/[^a-z0-9]/g,'') || 'mp4';
+  const mimes    = { mp4:'video/mp4', webm:'video/webm', mp3:'audio/mpeg', m4a:'audio/mp4', jpg:'image/jpeg' };
+  const mime     = mimes[safeExt] || 'video/mp4';
 
   let referer = 'https://www.google.com/';
-  if (videoUrl.includes('googlevideo'))   referer='https://www.youtube.com/';
-  else if (videoUrl.includes('fbcdn')||videoUrl.includes('cdninstagram')) referer='https://www.instagram.com/';
-  else if (videoUrl.includes('facebook')) referer='https://www.facebook.com/';
-  else if (videoUrl.includes('twimg'))    referer='https://twitter.com/';
-  else if (videoUrl.includes('tikwm'))    referer='https://www.tiktok.com/';
+  if (videoUrl.includes('googlevideo'))   referer = 'https://www.youtube.com/';
+  else if (videoUrl.includes('fbcdn') || videoUrl.includes('cdninstagram')) referer = 'https://www.instagram.com/';
+  else if (videoUrl.includes('twimg'))    referer = 'https://twitter.com/';
+  else if (videoUrl.includes('tiktok'))   referer = 'https://www.tiktok.com/';
 
   try {
-    const parsed   = new URL(videoUrl);
-    const mod      = parsed.protocol==='https:'?https:http;
+    const parsed = new URL(videoUrl);
+    const mod = parsed.protocol === 'https:' ? https : http;
     const proxyReq = mod.request({
       hostname: parsed.hostname,
-      port:     parsed.port||(parsed.protocol==='https:'?443:80),
-      path:     parsed.pathname+parsed.search,
-      method:   'GET',
-      timeout:  120000,
-      headers:{
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0',
-        'Accept':          '*/*',
-        'Accept-Encoding': 'identity',
-        'Referer':          referer,
-        'Origin':           referer.replace(/\/$/,'')
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method: 'GET',
+      timeout: 120000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0',
+        'Accept': '*/*', 'Accept-Encoding': 'identity',
+        'Referer': referer, 'Origin': referer.replace(/\/$/, '')
       }
     }, proxyRes => {
-      if (proxyRes.statusCode>=400) return res.status(502).json({error:`Source: ${proxyRes.statusCode}`});
+      if (proxyRes.statusCode >= 400) return res.status(502).json({ error: `Source: ${proxyRes.statusCode}` });
       res.setHeader('Content-Type', mime);
       res.setHeader('Content-Disposition', `attachment; filename="${safeFile}.${safeExt}"`);
       if (proxyRes.headers['content-length']) res.setHeader('Content-Length', proxyRes.headers['content-length']);
-      res.setHeader('Cache-Control','no-store');
-      res.setHeader('Access-Control-Allow-Origin','*');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Access-Control-Allow-Origin', '*');
       proxyRes.pipe(res);
     });
-    proxyReq.on('error', err=>{if(!res.headersSent) res.status(502).json({error:err.message});});
-    proxyReq.on('timeout',()=>{proxyReq.destroy(); if(!res.headersSent) res.status(504).json({error:'timeout'});});
+    proxyReq.on('error', err => { if (!res.headersSent) res.status(502).json({ error: err.message }); });
+    proxyReq.on('timeout', () => { proxyReq.destroy(); if (!res.headersSent) res.status(504).json({ error: 'timeout' }); });
     proxyReq.end();
   } catch(e) {
-    if (!res.headersSent) res.status(500).json({error:e.message});
+    if (!res.headersSent) res.status(500).json({ error: e.message });
   }
 });
 
-// ── DOWNLOAD endpoint ──────────────────────────────
+// ── DOWNLOAD endpoint ───────────────────────────────
 app.post('/download', async (req, res) => {
-  const {url:videoUrl} = req.body;
-  if (!videoUrl) return res.json({success:false, error:'No URL'});
+  const { url: videoUrl } = req.body;
+  if (!videoUrl) return res.json({ success: false, error: 'No URL' });
+
   const platform = detectPlatform(videoUrl);
 
-  // ── TIKTOK ────────────────────────────────────────
-  if (platform==='tiktok') {
+  // ── TIKTOK via TikWM ─────────────────────────────
+  if (platform === 'tiktok') {
     try {
-      const d = await callTikWM(videoUrl);
-      if (d?.code===0&&d?.data) {
-        const v=d.data, vid=v.id||'';
-        const medias=[];
+      const d = await tikwm(videoUrl);
+      if (d?.code === 0 && d?.data) {
+        const v = d.data, vid = v.id || '';
+        const medias = [];
         if (vid) {
-          medias.push({url:`https://tikwm.com/video/media/hdplay/${vid}.mp4`,quality:'⭐ 4K HD — No Watermark',ext:'mp4',direct:true});
-          medias.push({url:`https://tikwm.com/video/media/play/${vid}.mp4`, quality:'🎬 HD — No Watermark',   ext:'mp4',direct:true});
-          medias.push({url:`https://tikwm.com/video/music/${vid}.mp3`,      quality:'🎵 Audio MP3',            ext:'mp3',direct:true});
+          medias.push({ url: `https://tikwm.com/video/media/hdplay/${vid}.mp4`, quality: '⭐ 4K HD — No Watermark', ext: 'mp4', direct: true });
+          medias.push({ url: `https://tikwm.com/video/media/play/${vid}.mp4`,   quality: '🎬 HD — No Watermark',   ext: 'mp4', direct: true });
+          medias.push({ url: `https://tikwm.com/video/music/${vid}.mp3`,        quality: '🎵 Audio MP3',            ext: 'mp3', direct: true });
         }
-        if (v.images) v.images.forEach((img,i)=>medias.push({url:img,quality:`🖼 Image ${i+1}`,ext:'jpg',direct:true}));
-        return res.json({success:true, platform:'tiktok',
-          title:  v.title||(v.author?.nickname||'TikTok')+' Video',
-          thumb:  v.origin_cover||v.cover||'',
-          author: v.author?.nickname||'',
-          duration:v.duration||0, plays:v.play_count||0, likes:v.digg_count||0,
-          medias});
+        if (v.images) v.images.forEach((img, i) => medias.push({ url: img, quality: `🖼 Image ${i+1}`, ext: 'jpg', direct: true }));
+        return res.json({
+          success: true, platform: 'tiktok',
+          title: v.title || (v.author?.nickname || 'TikTok') + ' Video',
+          thumb: v.origin_cover || v.cover || '',
+          author: v.author?.nickname || '',
+          duration: v.duration || 0,
+          medias
+        });
       }
-    } catch(e){}
-    return res.json({success:false, error:'TikTok fetch failed'});
+    } catch(e) {}
+    return res.json({ success: false, error: 'TikTok failed' });
   }
 
-  // ── INSTAGRAM — fast direct API first ─────────────
-  if (platform==='instagram') {
-    // Try parallel: direct + RapidAPI simultaneously
-    const [direct, rapid] = await Promise.allSettled([
-      callInstagramDirect(videoUrl),
-      callRapidApi(videoUrl)
-    ]);
-
-    // Use whichever returns first with valid data
-    const rapidData = rapid.status==='fulfilled' ? rapid.value : null;
-
-    if (rapidData?.medias?.length) {
-      const medias=[], seenL={};
-      for (const item of rapidData.medias) {
-        if (!item.url) continue;
-        const ext=(item.extension||item.ext||'mp4').toLowerCase();
-        if (['opus','webm'].includes(ext)) continue;
-        const bl=buildLabel(item);
-        if (seenL[bl.label]) continue;
-        seenL[bl.label]=true;
-        medias.push({url:item.url, quality:`${bl.icon} ${bl.label}`, ext:bl.ext, stream:true});
-      }
-      medias.sort((a,b)=>a.quality.includes('🎵')&&!b.quality.includes('🎵')?1:!a.quality.includes('🎵')&&b.quality.includes('🎵')?-1:0);
-      if (medias.length) {
-        return res.json({success:true, platform:'instagram',
-          title:rapidData.title||'Instagram Video',
-          thumb:rapidData.thumbnail||'', medias});
-      }
-    }
-    return res.json({success:false, error:'Instagram fetch failed. Try again.'});
-  }
-
-  // ── FACEBOOK — fast direct API first ──────────────
-  if (platform==='facebook') {
-    // Try parallel: direct + RapidAPI
-    const [direct, rapid] = await Promise.allSettled([
-      callFacebookDirect(videoUrl),
-      callRapidApi(videoUrl)
-    ]);
-
-    // Direct API result
-    const directData = direct.status==='fulfilled' ? direct.value : null;
-    if (directData?.length) {
-      return res.json({success:true, platform:'facebook',
-        title:'Facebook Video', thumb:'', medias:directData});
-    }
-
-    // RapidAPI fallback
-    const rapidData = rapid.status==='fulfilled' ? rapid.value : null;
-    if (rapidData?.medias?.length) {
-      const medias=[], seenL={};
-      for (const item of rapidData.medias) {
-        if (!item.url) continue;
-        const ext=(item.extension||item.ext||'mp4').toLowerCase();
-        if (['opus','webm'].includes(ext)) continue;
-        const bl=buildLabel(item);
-        if (seenL[bl.label]) continue;
-        seenL[bl.label]=true;
-        medias.push({url:item.url, quality:`${bl.icon} ${bl.label}`, ext:bl.ext, stream:true});
-      }
-      if (medias.length) {
-        let title=rapidData.title||'';
-        if (!title||title.startsWith('-')) title='Facebook Video';
-        return res.json({success:true, platform:'facebook', title, thumb:rapidData.thumbnail||'', medias});
-      }
-    }
-    return res.json({success:false, error:'Facebook fetch failed. Try again.'});
-  }
-
-  // ── YOUTUBE ────────────────────────────────────────
-  if (platform==='youtube') {
-    try {
-      const d = await callRapidApi(videoUrl);
-      if (!d?.medias?.length) return res.json({success:false, error:'YouTube fetch failed'});
-
-      let f18=null, f22=null, bestAudio=null;
-      for (const item of d.medias) {
-        if (!item.url) continue;
-        const ext=(item.extension||item.ext||'').toLowerCase();
-        const fid=parseInt(item.formatId||0);
-        if (fid===18&&ext==='mp4') { f18=item; continue; }
-        if (fid===22&&ext==='mp4') { f22=item; continue; }
-        if (item.type==='audio'&&ext==='m4a') {
-          if (!bestAudio||parseInt(item.bitrate||0)>parseInt(bestAudio.bitrate||0)) bestAudio=item;
-        }
-      }
-      const medias=[];
-      if (f22) medias.push({url:f22.url, quality:'📹 HD (720p)',  ext:'mp4', stream:true});
-      if (f18) medias.push({url:f18.url, quality:'📹 360p',       ext:'mp4', stream:true});
-      if (bestAudio) {
-        const bl=buildLabel(bestAudio);
-        medias.push({url:bestAudio.url, quality:`${bl.icon} ${bl.label}`, ext:bl.ext, stream:true});
-      }
-
-      let title=d.title||'YouTube Video';
-      let thumb=d.thumbnail||'';
-      if (!thumb) {
-        const vm=videoUrl.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
-        if (vm) thumb=`https://img.youtube.com/vi/${vm[1]}/hqdefault.jpg`;
-      }
-      return res.json({success:true, platform:'youtube', title, thumb, medias});
-    } catch(e) {
-      return res.json({success:false, error:'YouTube fetch failed'});
-    }
-  }
-
-  // ── OTHERS (Twitter, Reddit, Pinterest, Vimeo) ─────
+  // ── ALL OTHER PLATFORMS via yt-dlp ───────────────
   try {
-    const d = await callRapidApi(videoUrl);
-    if (!d?.medias?.length) return res.json({success:false, error:'Could not fetch video'});
+    const info = await ytdlp(videoUrl);
+    const title = info.title || 'Video';
+    const thumb = info.thumbnail || '';
 
-    const medias=[], seenL={};
-    for (const item of d.medias) {
-      if (!item.url) continue;
-      const ext=(item.extension||item.ext||'mp4').toLowerCase();
-      if (['opus','webm'].includes(ext)) continue;
-      const bl=buildLabel(item);
-      if (seenL[bl.label]) continue;
-      seenL[bl.label]=true;
-      medias.push({url:item.url, quality:`${bl.icon} ${bl.label}`, ext:bl.ext, stream:true});
+    // YouTube: get merged formats only
+    if (platform === 'youtube') {
+      const formats = (info.formats || []);
+      
+      // Find combined formats (has both video and audio)
+      const combined = formats.filter(f =>
+        f.vcodec !== 'none' && f.acodec !== 'none' &&
+        f.ext === 'mp4' && f.height > 0
+      ).sort((a, b) => (b.height || 0) - (a.height || 0));
+
+      // Remove duplicates by height
+      const seen = {};
+      const unique = combined.filter(f => {
+        if (seen[f.height]) return false;
+        seen[f.height] = true;
+        return true;
+      });
+
+      // Best audio
+      const audioFmt = formats.filter(f => f.vcodec === 'none' && f.acodec !== 'none')
+        .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
+
+      const medias = unique.map(f => ({
+        url: f.url, ext: 'mp4', stream: true,
+        quality: f.height >= 2160 ? '⭐ 4K (2160p)' :
+                 f.height >= 1440 ? '⭐ 2K (1440p)' :
+                 f.height >= 1080 ? '🎬 Full HD (1080p)' :
+                 f.height >= 720  ? '📹 HD (720p)' :
+                 f.height >= 480  ? '📹 SD (480p)' : `📹 ${f.height}p`
+      }));
+
+      if (audioFmt) medias.push({ url: audioFmt.url, quality: '🎵 Audio Only', ext: audioFmt.ext || 'm4a', stream: true });
+
+      return res.json({ success: true, platform: 'youtube', title, thumb, medias });
     }
-    medias.sort((a,b)=>a.quality.includes('🎵')&&!b.quality.includes('🎵')?1:!a.quality.includes('🎵')&&b.quality.includes('🎵')?-1:0);
-    return res.json({success:true, platform, title:d.title||'Video', thumb:d.thumbnail||'', medias});
+
+    // Instagram, Facebook, Twitter, Reddit, Vimeo etc
+    const formats = (info.formats || []);
+    
+    // Get best video formats
+    const videoFmts = formats.filter(f =>
+      f.vcodec !== 'none' && f.url && f.height > 0
+    ).sort((a, b) => (b.height || 0) - (a.height || 0));
+
+    // Remove duplicate heights
+    const seen = {};
+    const unique = videoFmts.filter(f => {
+      if (seen[f.height]) return false;
+      seen[f.height] = true;
+      return true;
+    }).slice(0, 4);
+
+    // If no formats found, use url directly
+    if (!unique.length && info.url) {
+      return res.json({
+        success: true, platform, title, thumb,
+        medias: [{ url: info.url, quality: '🎬 HD Video', ext: info.ext || 'mp4', stream: true }]
+      });
+    }
+
+    const medias = unique.map(f => ({
+      url: f.url, stream: true,
+      ext: f.ext || 'mp4',
+      quality: f.height >= 1080 ? '🎬 Full HD (1080p)' :
+               f.height >= 720  ? '📹 HD (720p)' :
+               f.height >= 480  ? '📹 SD (480p)' : `📹 ${f.height}p`
+    }));
+
+    // Add audio if available
+    const audioFmt = formats.filter(f => f.vcodec === 'none' && f.acodec !== 'none' && f.url)
+      .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
+    if (audioFmt) medias.push({ url: audioFmt.url, quality: '🎵 Audio Only', ext: audioFmt.ext || 'm4a', stream: true });
+
+    return res.json({ success: true, platform, title, thumb, medias });
+
   } catch(e) {
-    return res.json({success:false, error:'Fetch failed: '+e.message});
+    return res.json({ success: false, error: `Could not fetch video: ${e.message}` });
   }
 });
 
-app.get('/',     (req,res)=>res.json({status:'VidSave Pro API v5', ok:true}));
-app.get('/health',(req,res)=>res.json({ok:true}));
-app.listen(PORT, ()=>console.log(`VidSave Pro API v5 on port ${PORT}`));
+app.get('/', (req, res) => res.json({ status: 'VidSave Pro API v6 - yt-dlp powered', ok: true }));
+app.get('/health', (req, res) => res.json({ ok: true }));
+app.listen(PORT, () => console.log(`VidSave Pro API v6 on port ${PORT}`));
