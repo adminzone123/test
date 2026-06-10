@@ -12,7 +12,9 @@ app.use(express.json());
 // ── yt-dlp extract info ─────────────────────────────
 function ytdlp(url, extraArgs = '') {
   return new Promise((resolve, reject) => {
-    const cmd = `yt-dlp --no-warnings --dump-json ${extraArgs} "${url}"`;
+    const fs = require('fs');
+    const cookiesArg = fs.existsSync('/var/www/api/cookies.txt') ? '--cookies /var/www/api/cookies.txt' : '';
+    const cmd = `yt-dlp --no-warnings --dump-json ${cookiesArg} ${extraArgs} "${url}"`;
     exec(cmd, { timeout: 45000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
       if (err) return reject(err);
       try { resolve(JSON.parse(stdout)); }
