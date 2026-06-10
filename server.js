@@ -221,6 +221,47 @@ app.post('/download', async (req, res) => {
   }
 });
 
+
+// /stream - pipe yt-dlp output directly to browser (for expired URLs)
+app.get('/stream', (req, res) => {
+  const { url: videoUrl, filename = 'vidsavepro', ext = 'mp4', height = '720' } = req.query;
+  if (!videoUrl) return res.status(400).send('No URL');
+
+  const safeFile = (filename||'vidsavepro').replace(/[^\w\s\-\.]/g,'_').substring(0,80);
+  const safeExt = (ext||'mp4').replace(/[^a-z0-9]/g,'') || 'mp4';
+  const mimes = { mp4:'video/mp4', webm:'video/webm', mp3:'audio/mpeg', m4a:'audio/mp4' };
+  const mime = mimes[safeExt] || 'video/mp4';
+
+  const fs = require('fs');
+  const cookiesArg = fs.existsSync('/var/www/api/cookies.txt') ? '--cookies /var/www/api/cookies.txt' : '';
+  
+  // Format selection based on ext
+  let formatArg = '-f "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best"';
+  if (safeExt === 'mp3' || safeExt === 'm4a') {
+    formatArg = '-f "bestaudio/best" --extract-audio --audio-format mp3';
+  }
+
+  res.setHeader('Content-Type', mime);
+  res.setHeader('Content-Disposition', `attachment; filename="${safeFile}.${safeExt}"`);
+  res.setHeader('Cache-Control', 'no-store');
+
+  const { spawn } = require('child_process');
+  const args = [
+    '--no-warnings', '-o', '-',
+    ...cookiesArg ? ['--cookies', '/var/www/api/cookies.txt'] : [],
+    '-f', `bestvideo[ext=mp4][height<=${height}]+bestaudio[ext=m4a]/best[ext=mp4][height<=${height}]/best`,
+    decodeURIComponent(videoUrl)
+  ];
+
+  const proc = spawn('yt-dlp', args);
+  proc.stdout.pipe(res);
+  proc.stderr.on('data', d => console.error('yt-dlp:', d.toString()));
+  proc.on('error', err => {
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  });
+  req.on('close', () => proc.kill());
+});
+
 app.get('/', (req, res) => res.json({ status: 'VidSave Pro API v6 - yt-dlp powered', ok: true }));
 app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => console.log(`VidSave Pro API v6 on port ${PORT}`));
